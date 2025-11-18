@@ -4,8 +4,12 @@ import json
 import time
 import threading
 import random
+from firipy import FiriAPI
 
-DATA_FILE = 'equities.json'
+DATA_FILE = 'crypto.json'
+
+key =
+secret_key = 
 
 def fetch_mock_api(symbol):
     return {
@@ -20,13 +24,13 @@ class TradingBotGUI:
     def __init__(self, root):
         self.root = root
         self.root.title("Trading Bot")
-        self.equities = self.load_equities()
+        self.cryptos = self.load_cryptos()
         self.system_running = False
 
         self.form_frame = tk.Frame(root)
         self.form_frame.pack(pady=10)
 
-        # Add new equity to trading bot
+        # Add new crypto to trading bot
         tk.Label(self.form_frame, text="Symbol:").grid(row=0, column=0)
         self.symbol_entry = tk.Entry(self.form_frame)
         self.symbol_entry.grid(row=0, column=1)
@@ -39,10 +43,10 @@ class TradingBotGUI:
         self.drawdown_entry = tk.Entry(self.form_frame)
         self.drawdown_entry.grid(row=0, column=5)
 
-        self.add_button = tk.Button(self.form_frame, text="Add Equity", command=self.add_equity)
+        self.add_button = tk.Button(self.form_frame, text="Add crypto", command=self.add_crypto)
         self.add_button.grid(row=0, column=6)
 
-        # Table to track traded equities
+        # Table to track traded cryptos
         self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "Entry Price", "Levels", "Status"), show='headings')
         for col in ["Symbol", "Position", "Entry Price", "Levels", "Status"]:
             self.tree.heading(col, text=col)
@@ -53,7 +57,7 @@ class TradingBotGUI:
         self.toggle_system_button = tk.Button(root, text="Toggle Selected System", command=self.toggle_selected_system)
         self.toggle_system_button.pack(pady=5)
 
-        self.remove_button = tk.Button(root, text="Remove Selected Equity", command=self.remove_selected_equity)
+        self.remove_button = tk.Button(root, text="Remove Selected crypto", command=self.remove_selected_crypto)
         self.remove_button.pack(pady=5)
 
         # AI Component
@@ -78,7 +82,7 @@ class TradingBotGUI:
         self.auto_update_thread.start()
 
 
-    def add_equity(self):
+    def add_crypto(self):
         symbol = self.symbol_entry.get().upper()
         levels = self.levels_entry.get()
         drawdown = self.drawdown_entry.get()
@@ -93,40 +97,40 @@ class TradingBotGUI:
 
         level_prices = {i+1 : round(entry_price * (1-drawdown*(i+1)), 2) for i in range(levels)}
 
-        self.equities[symbol] = {
+        self.cryptos[symbol] = {
             "position": 0,
             "entry_price": entry_price,
             "levels": level_prices,
             "status": "off"
         }
-        self.save_equities()
+        self.save_cryptos()
         self.refresh_table()
 
     def toggle_selected_system(self):
         selected_items = self.tree.selection()
         if not selected_items:
-            messagebox.showerror("Error", "No equity selected")
+            messagebox.showerror("Error", "No crypto selected")
             return
         
         for item in selected_items:
             symbol = self.tree.item(item)['values'][0]
-            self.equities[symbol]['status'] = "On" if self.equities[symbol]['status'] == "Off" else "Off"
+            self.cryptos[symbol]['status'] = "On" if self.cryptos[symbol]['status'] == "Off" else "Off"
 
-        self.save_equities()
+        self.save_cryptos()
         self.refresh_table()
 
-    def remove_selected_equity(self):
+    def remove_selected_crypto(self):
         selected_items = self.tree.selection()
         if not selected_items:
-            messagebox.showwarning("Warning", "No equity selected")
+            messagebox.showwarning("Warning", "No crypto selected")
             return
         
         for item in selected_items:
             symbol = self.tree.item(item)['values'][0]
-            if symbol in self.equities:
-                del self.equities[symbol]
+            if symbol in self.cryptos:
+                del self.cryptos[symbol]
 
-        self.save_equities()
+        self.save_cryptos()
         self.refresh_table()
 
     def send_message(self):
@@ -144,7 +148,7 @@ class TradingBotGUI:
         for row in self.tree.get_children():
             self.tree.delete(row)
 
-        for symbol, data in self.equities.items():
+        for symbol, data in self.cryptos.items():
             self.tree.insert("", "end", values=(
                 symbol,
                 data["position"],
@@ -158,11 +162,11 @@ class TradingBotGUI:
             time.sleep(5)
             self.update_prices()
 
-    def save_equities(self):
+    def save_cryptos(self):
         with open(DATA_FILE, 'w') as f:
-            json.dump(self.equities, f)
+            json.dump(self.cryptos, f)
     
-    def load_equities(self):
+    def load_cryptos(self):
         try:
             with open(DATA_FILE, 'r') as f:
                 return json.load(f)
@@ -171,7 +175,7 @@ class TradingBotGUI:
     
     def on_close(self):
         self.running = False
-        self.save_equities()
+        self.save_cryptos()
         self.root.destroy()
     
 if __name__ == "__main__":

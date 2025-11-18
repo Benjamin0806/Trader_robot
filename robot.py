@@ -5,6 +5,7 @@ import time
 import threading
 import random
 from firipy import FiriAPI as tradeapi
+import openai
 
 DATA_FILE = 'crypto.json'
 
@@ -13,13 +14,61 @@ secret_key = "Insert your Firi API secret key here"
 BASE_URL = "Insert base url here"
 api = tradeapi.REST(key, secret_key, BASE_URL, api_version="v2")
 
+def fetch_portfolio():
+    positions = api.list_positions()
+    portfolio = []
+    for position in positions:
+        portfolio.append({
+            "symbol": position.symbol,
+            "qty": position.qty,
+            "entry_price": position.avg_entry_price,
+            "current_price": position.current_price,
+            "unrealized_pl": position.unrealized_pl,
+            "side": "buy"
+        })
+    return portfolio
+
+def fetch_open_orders():
+    orders = api.list_orders(status='open')
+    open_orders = []
+    for order in orders:
+        open_orders.append({
+            "symbol": order.symbol,
+            "qty": order.qty,
+            "limit_price": order.limit_price,
+            "side": "buy"
+        })
+    return open_orders
+
 def fetch_mock_api(symbol):
     return {
         "price": 100
     }
 
-def mock_chatgpt_response(message):
-    return f"Mock response to: {message}"
+def chatgpt_response(message):
+    portfolio_data = fetch_portfolio()
+    open_orders = fetch_open_orders()
+
+    pre_prompt = f"""
+    You are an AI portfolio manager responsible for analyzing my crypto-portfolio.
+    Your tasks are the following:
+    1. Evaluate risk-exposures of my current holdings.
+    2. Analyze my open limit orders and their potential impact.
+    3. Provide insights into portfolio health, diversification, trade-adjustments etc.
+    4. Speculate on the market outlook based on current market conditions.
+    5. Identify potential market risks and suggest risk management strategies.
+    
+    Here is my current portfolio data: {portfolio_data}
+    Here are my open orders: {open_orders}
+    Overall, answer the following question with priority having that background: {message}
+    """
+
+    response = openai.ChatCompletion.create(
+        model="gpt-4",
+        messages=[{"role": "system", "content": pre_prompt}],
+        api_key = "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"
+    )
+    return response['choices'][0]['message']['content']
 
 class TradingBotGUI:
 
@@ -141,7 +190,8 @@ class TradingBotGUI:
         if not message:
             return
         
-        response = mock_chatgpt_response(message)
+        response = chatgpt_response(message)
+        
         self.chat_output.config(state=tk.NORMAL)
         self.chat_output.insert(tk.END, f"You: {message}\n{response}\n\n")
         self.chat_output.config(state=tk.DISABLED)

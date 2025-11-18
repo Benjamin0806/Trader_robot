@@ -77,4 +77,105 @@ class TradingBotGUI:
         self.auto_update_thread = threading.Thread(target=self.auto_update, daemon=True)
         self.auto_update_thread.start()
 
+
+    def add_equity(self):
+        symbol = self.symbol_entry.get().upper()
+        levels = self.levels_entry.get()
+        drawdown = self.drawdown_entry.get()
+
+        if not symbol or not levels.isdigit() or not drawdown.replace('.', '', 1).isdigit():
+            messagebox.showerror("Error", "Invalid Input")
+            return
         
+        levels = int(levels)
+        drawdown = float(drawdown) / 100
+        entry_price = fetch_mock_api(symbol)["price"]
+
+        level_prices = {i+1 : round(entry_price * (1-drawdown*(i+1), 2)) for i in range(levels)}
+
+        self.equities[symbol] = {
+            "position": 0,
+            "entry_price": entry_price,
+            "levels": level_prices,
+            "status": "off"
+        }
+        self.save_equities()
+        self.refresh_table()
+
+    def toggle_selected_system(self):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showerror("Error", "No equity selected")
+            return
+        
+        for item in selected_items:
+            symbol = self.tree.item(item)['values'][0]
+            self.equities[symbol]['status'] = "On" if self.equities[symbol]['status'] == "Off" else "Off"
+
+        self.save_equities()
+        self.refresh_table()
+
+    def remove_selected_equity(self):
+        selected_items = self.tree.selection()
+        if not selected_items:
+            messagebox.showwarning("Warning", "No equity selected")
+            return
+        
+        for item in selected_items:
+            symbol = self.tree.item(item)['values'][0]
+            if symbol in self.equities:
+                del self.equities[symbol]
+
+        self.save_equities()
+        self.refresh_table()
+
+    def send_message(self):
+        message = self.chat_input.get()
+        if not message:
+            return
+        
+        response = mock_chatgpt_response(message)
+        self.chat_output.config(state=tk.NORMAL)
+        self.chat_output.insert(tk.END, f"You: {message}\n{response}\n\n")
+        self.chat_output.config(state=tk.DISABLED)
+        self.chat_input.delete(0, tk.END)
+
+    def refresh_table(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+
+        for symbol, data in self.equities.items():
+            self.tree.insert("", "end", values=(
+                symbol,
+                data["position"],
+                data["entry_price"],
+                str(data["levels"]),
+                data["status"]
+            ))
+
+    def auto_update(self):
+        while self.running:
+            time.sleep(5)
+            self.update_prices()
+
+    def save_equities(self):
+        with open(DATA_FILE, 'w') as f:
+            json.dump(self.equities, f)
+    
+    def load_equities(self):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {}
+    
+    def on_close(self):
+        self.running = False
+        self.save_equities()
+        self.root.destroy()
+    
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = TradingBotGUI(root)
+    root.protocol("WM_DELETE_WINDOW", app.on_close)
+    root.mainloop()

@@ -4,12 +4,14 @@ import json
 import time
 import threading
 import random
-from firipy import FiriAPI
+from firipy import FiriAPI as tradeapi
 
 DATA_FILE = 'crypto.json'
 
-key =
-secret_key = 
+key = "Insert your Firi API key here"
+secret_key = "Insert your Firi API secret key here"
+BASE_URL = "Insert base url here"
+api = tradeapi.REST(key, secret_key, BASE_URL, api_version="v2")
 
 def fetch_mock_api(symbol):
     return {
@@ -101,6 +103,7 @@ class TradingBotGUI:
             "position": 0,
             "entry_price": entry_price,
             "levels": level_prices,
+            "drawdown": drawdown,
             "status": "off"
         }
         self.save_cryptos()
@@ -144,6 +147,92 @@ class TradingBotGUI:
         self.chat_output.config(state=tk.DISABLED)
         self.chat_input.delete(0, tk.END)
 
+    def fetch_firi_data(self, symbol):
+        try:
+            barset = api.get_latest_trade(symbol)
+            return {"price":barset.price}
+        except Exception as e:
+            return {"price":-1}
+
+    def check_existing_orders(self, symbol, price): 
+        try:
+            orders = api.list_orders(status='open', symbols=symbol)
+            for order in orders:
+                if float(order.limit_price) == price:
+                    return True
+        except Exception as e:
+            messagebox.showerror("API Error", "Error checking orders {e}")
+        return False
+    
+    def get_max_entry_price(self, symbol):
+        try:
+            orders = api.list_orders(status='filled', limit=50)
+            prices = [float(order.filled_avg_price) for order in orders if order.filled_avg_price and order.symbol == symbol]
+            return max(prices) if prices else -1
+        except Exception as e:
+            messagebox.showerror("API Error", f"Error fetching orders {e}")
+            return 0
+
+    def trade_systems(self):
+        for symbol, data in self.cryptos.items():
+            if data['status'] == 'On':
+                position_exists = False
+                try:
+                    position = api.get_position(symbol)
+                    entry_price = self.get_max_entry_price(symbol)
+                    position_exists = True
+                except Exception as e:
+                    api.submit_order(
+                        symbol = symbol,
+                        qty = 1,
+                        side = "buy",
+                        type = "market",
+                        time_in_force = "gtc"
+                    )
+                    messagebox.showinfo("Order Placed", f"Initial Order Placed for {symbol}")
+                    time.sleep(2)
+                    entry_price = self.get_max_entry_price(symbol)
+                print(entry_price)
+
+                level_prices = {i+1 : round(entry_price * (1-data['drawdown']*(i+1)), 2) for i in range(len(data['levels']))}
+                existing_levels = self.cryptos.get(symbol, {}).get("levels", {})
+                for level, price in level_prices.items():
+                    if level not in existing_levels and -level not in existing_levels:
+                        existing_levels[level] = price
+
+                self.cryptos[symbol]['entry_price'] = entry_price
+                self.cryptos[symbol]['levels'] = existing_levels
+                self.cryptos[symbol]['position'] = 1
+
+                for level, price in level_prices.items():
+                    if level in self.cryptos[symbol]['levels']:
+                        self.place_order(symbol, price, level)
+
+            self.save_cryptos()
+            self.refresh_table()
+        else:
+            return 
+        
+    def place_order(self, symbol, price, level):
+        if -level in self.cryptos[symbol]['levels'] or '-1' in self.cryptos[symbol]['levels'].keys():
+            return
+        
+        try:
+            api.submit_order(
+                symbol=symbol,
+                qty=1,
+                side="buy",
+                type="limit",
+                time_in_force="gtc",
+                limit_price=price
+            )
+            self.cryptos[symbol]['levels'][-level] = price
+            del self.cryptos[symbol]['levels'][level]
+            print("Placed order for {symbol}@{price}")
+        except Exception as e:
+            messagebox.showerror("Order Error", f"Error placing order {e}")
+
+
     def refresh_table(self):
         for row in self.tree.get_children():
             self.tree.delete(row)
@@ -160,7 +249,7 @@ class TradingBotGUI:
     def auto_update(self):
         while self.running:
             time.sleep(5)
-            self.update_prices()
+            self.trade_systems()
 
     def save_cryptos(self):
         with open(DATA_FILE, 'w') as f:

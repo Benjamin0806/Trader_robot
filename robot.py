@@ -33,11 +33,11 @@ class TradingBotGUI:
 
         tk.Label(self.form_frame, text="Levels:").grid(row=0, column=2)
         self.levels_entry = tk.Entry(self.form_frame)
-        self.levels_entry.grid(row=1, column=3)
+        self.levels_entry.grid(row=0, column=3)
 
         tk.Label(self.form_frame, text="Drawdown%:").grid(row=0, column=4)
         self.drawdown_entry = tk.Entry(self.form_frame)
-        self.drawdown_entry.grid(row=1, column=5)
+        self.drawdown_entry.grid(row=0, column=5)
 
         self.add_button = tk.Button(self.form_frame, text="Add Equity", command=self.add_equity)
         self.add_button.grid(row=0, column=6)
@@ -50,7 +50,7 @@ class TradingBotGUI:
         self.tree.pack(pady=10)
 
         # Buttons to control the bot
-        self.toggle_system_button = tk.Button(root, text="Toggle Selected System", command=self.toggle_system)
+        self.toggle_system_button = tk.Button(root, text="Toggle Selected System", command=self.toggle_selected_system)
         self.toggle_system_button.pack(pady=5)
 
         self.remove_button = tk.Button(root, text="Remove Selected Equity", command=self.remove_selected_equity)
@@ -91,7 +91,7 @@ class TradingBotGUI:
         drawdown = float(drawdown) / 100
         entry_price = fetch_mock_api(symbol)["price"]
 
-        level_prices = {i+1 : round(entry_price * (1-drawdown*(i+1), 2)) for i in range(levels)}
+        level_prices = {i+1 : round(entry_price * (1-drawdown*(i+1)), 2) for i in range(levels)}
 
         self.equities[symbol] = {
             "position": 0,

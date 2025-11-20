@@ -5,11 +5,11 @@ import time
 import threading
 import random
 from firipy import FiriAPI as tradeapi
-import openai
+import anthropic
 
 DATA_FILE = 'crypto.json'
 
-key = "Insert your Firi API key here"
+key = "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"
 secret_key = "Insert your Firi API secret key here"
 BASE_URL = "Insert base url here"
 api = tradeapi.REST(key, secret_key, BASE_URL, api_version="v2")

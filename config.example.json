@@ -1,0 +1,43 @@
+{
+  "risk": {
+    "trading_enabled": true,
+    "max_capital_per_symbol": 0.20,
+    "max_total_exposure": 0.80,
+    "min_spread_pct": 0.05,
+    "atr_spike_circuit_breaker": 0.30,
+    "max_slippage_pct": 0.02,
+    "dry_run": false,
+    "min_order_value": 100.0
+  },
+  "grid": {
+    "default_levels": 5,
+    "atr_period": 14,
+    "grid_spacing_multiplier": 0.5,
+    "tp_multiplier": 1.5,
+    "tick_size": 0.01,
+    "trend_threshold": 0.01
+  },
+  "market": {
+    "binance_api": "https://api.binance.com/api/v3",
+    "ohlc_interval": "1h",
+    "trend_interval": "4h",
+    "ohlc_limit": 100
+  },
+  "persistence": {
+    "state_dir": "state",
+    "logs_dir": "logs",
+    "auto_save_interval": 300
+  },
+  "api": {
+    "max_retries": 3,
+    "base_delay": 1.0,
+    "max_delay": 30.0,
+    "backoff_factor": 2.0,
+    "timeout": 10
+  },
+  "gui": {
+    "update_interval_ms": 5000,
+    "theme": "light",
+    "show_chart": false
+  }
+}

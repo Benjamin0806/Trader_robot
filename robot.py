@@ -67,27 +67,26 @@ class MarketAnalyzer:
     
     @staticmethod
     def calculate_atr(ohlc: list, period: int = 14):
-        """
-        Calculate ATR (Average True Range) from OHLC.
-        ohlc: list of [open_time, open, high, low, close, ...]
-        Returns: (current_atr, atr_list)
-        """
-        if len(ohlc) < period:
+        if len(ohlc) < period + 1:
             return None, []
-        
-        atr_values = []
-        for i in range(len(ohlc)):
+
+        tr_list = []
+        for i in range(1, len(ohlc)):
             high = float(ohlc[i][2])
             low = float(ohlc[i][3])
-            close_curr = float(ohlc[i][4])
-            close_prev = float(ohlc[i-1][4]) if i > 0 else close_curr
-            
+            close_prev = float(ohlc[i-1][4])
+
             tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
-            atr_values.append(tr)
-        
-        # Simple moving average of true ranges
-        atr = sum(atr_values[-period:]) / period
-        return atr, atr_values
+            tr_list.append(tr)
+
+        # compute simple moving ATR series (SMA over TR)
+        atr_list = []
+        for i in range(period - 1, len(tr_list)):
+            window = tr_list[i - (period - 1): i + 1]
+            atr_list.append(sum(window) / period)
+
+        # current ATR is last item in atr_list
+        return (atr_list[-1] if atr_list else None), atr_list
     
     @staticmethod
     def calculate_ema(prices: list, period: int = 20):
@@ -134,21 +133,15 @@ class MarketAnalyzer:
     
     @staticmethod
     def is_volatility_spike(symbol: str, interval: str = "1h", threshold_mult: float = 1.5):
-        """
-        Detect volatility spike: current ATR > threshold_mult × average ATR.
-        Returns: bool
-        """
         ohlc = MarketAnalyzer.fetch_ohlc(symbol, interval=interval, limit=100)
-        if not ohlc or len(ohlc) < 14:
+        if not ohlc or len(ohlc) < 30:
             return False
-        
-        atr, atr_values = MarketAnalyzer.calculate_atr(ohlc, period=14)
-        if atr is None or len(atr_values) < 30:
+
+        current_atr, atr_series = MarketAnalyzer.calculate_atr(ohlc, period=14)
+        if not current_atr or len(atr_series) < 10:
             return False
-        
-        avg_atr = sum(atr_values[-30:]) / 30
-        current_atr = atr_values[-1]
-        
+
+        avg_atr = sum(atr_series[-30:]) / min(30, len(atr_series))
         return current_atr > avg_atr * threshold_mult
 
 
@@ -161,7 +154,12 @@ class FiriClient:
         self.api_key = api_key
         self.secret_key = secret_key
         self.client_id = os.getenv("FIRI_CLIENT_ID")
+        if not self.client_id:
+            raise ValueError("FIRI_CLIENT_ID environment variable missing")
         self.base_url = base_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": "TradingBot/1.0"})
+        self.request_timeout = 10  # seconds
         
     def _generate_signature(self, body_dict: dict):
         """
@@ -214,26 +212,16 @@ class FiriClient:
         return url_params, headers, request_body if request_body else {}
 
     def _request(self, method: str, path: str, body: dict = None):
-        # Get authentication parameters
         url_params, headers, body_to_send = self._get_auth_params(body)
-        
-        # Construct full URL
         url = f"{self.base_url}{path}{url_params}"
-        
-        logging.debug("FIRI REQUEST: %s %s", method, path)
-        logging.debug("URL: %s", url)
-        
         try:
             if body_to_send:
-                resp = requests.request(method, url, headers=headers, json=body_to_send)
+                resp = self.session.request(method, url, headers=headers, json=body_to_send, timeout=self.request_timeout)
             else:
-                resp = requests.request(method, url, headers=headers)
-                
-            logging.debug("Response status: %s", resp.status_code)
-            
+                resp = self.session.request(method, url, headers=headers, timeout=self.request_timeout)
+
             resp.raise_for_status()
             return resp.json()
-            
         except requests.exceptions.HTTPError as e:
             logging.error("Firi API HTTP error %s: %s", e.response.status_code, e.response.text)
             raise Exception(f"Firi API error {e.response.status_code}: {e.response.text}")
@@ -442,7 +430,11 @@ def fetch_portfolio():
         currency = item.get("currency")
         balance = float(item.get("balance", 0))
         if currency and balance > 0:
-            balances[currency] = balance
+            # store both currency and an assumed NOK market name
+            balances[currency] = {
+                "qty": balance,
+                "market_guess": currency + "NOK"
+            }
 
     # 2. Fetch past orders to compute average buy price for each asset
     # We'll fetch **all** filled orders and filter
@@ -479,39 +471,49 @@ def fetch_portfolio():
             stats[sym]["cost"] += cost
 
     portfolio = []
-    for sym, qty in balances.items():
-        if qty <= 0:
-            continue
-
+    for currency, info in balances.items():
+        qty = info["qty"]
+        market_guess = info["market_guess"]
         avg_entry = None
         unrealized_pl = None
         current_price = None
-        side = "buy"
 
-        if sym in stats and stats[sym]["amt"] > 0:
-            avg_entry = stats[sym]["cost"] / stats[sym]["amt"]
-            # fetch latest market price
+        # Try to find stats by market string first, then by base currency
+        stats_key = None
+        for k in stats.keys():
+            if k == market_guess or k.startswith(currency):
+                stats_key = k
+                break
+
+        if stats_key and stats[stats_key]["amt"] > 0:
+            avg_entry = stats[stats_key]["cost"] / stats[stats_key]["amt"]
+            # attempt to fetch ticker for market_key, fallback to currency market_guess
             try:
-                ticker = firi.get_ticker(sym)
+                ticker = firi.get_ticker(stats_key)
                 current_price = float(ticker.get("last", 0))
                 unrealized_pl = qty * (current_price - avg_entry)
-            except Exception as e:
-                logging.debug("Could not fetch ticker for %s: %s", sym, e)
+            except Exception:
+                try:
+                    ticker = firi.get_ticker(market_guess)
+                    current_price = float(ticker.get("last", 0))
+                    unrealized_pl = qty * (current_price - avg_entry)
+                except Exception:
+                    current_price = None
         else:
-            # If no order history, we don't know entry price
+            # No order history; try current ticker via guessed market
             try:
-                ticker = firi.get_ticker(sym)
+                ticker = firi.get_ticker(market_guess)
                 current_price = float(ticker.get("last", 0))
-            except Exception as e:
-                logging.debug("Could not fetch ticker for %s: %s", sym, e)
+            except Exception:
+                current_price = None
 
         portfolio.append({
-            "symbol": sym,
+            "symbol": market_guess,   # use a market-like identifier so other code can match
+            "currency": currency,
             "qty": qty,
             "entry_price": avg_entry,
             "current_price": current_price,
-            "unrealized_pl": unrealized_pl,
-            "side": side
+            "unrealized_pl": unrealized_pl
         })
 
     return portfolio
@@ -620,12 +622,8 @@ class TradingBotGUI:
         self.levels_entry = tk.Entry(self.form_frame)
         self.levels_entry.grid(row=0, column=3)
 
-        tk.Label(self.form_frame, text="Drawdown%:").grid(row=0, column=4)
-        self.drawdown_entry = tk.Entry(self.form_frame)
-        self.drawdown_entry.grid(row=0, column=5)
-
         self.add_button = tk.Button(self.form_frame, text="Add crypto", command=self.add_crypto)
-        self.add_button.grid(row=0, column=6)
+        self.add_button.grid(row=0, column=4)
 
         # GUI: table
         self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "Entry Price", "Levels", "Status"), show="headings")
@@ -667,16 +665,42 @@ class TradingBotGUI:
 
     # — Data persistence
     def save_cryptos(self):
+        # Create a serializable copy
+        serializable = {}
+        for symbol, data in self.cryptos.items():
+            serializable[symbol] = {
+                "position": data.get("position", 0),
+                "entry_price": data.get("entry_price"),
+                "num_levels": data.get("num_levels"),
+                "status": data.get("status", "Off"),
+                "buy_orders_placed": data.get("buy_orders_placed", {}),
+                "sell_orders_placed": data.get("sell_orders_placed", {}),
+                # persist grid *state* (if present) but not the object
+                "grid_state": data.get("grid_strategy").get_status() if data.get("grid_strategy") else None
+            }
         with open(DATA_FILE, "w") as f:
-            json.dump(self.cryptos, f, indent=2)
+            json.dump(serializable, f, indent=2)
 
     def load_cryptos(self):
         try:
             with open(DATA_FILE, "r") as f:
-                data = json.load(f)
-            return data
+                raw = json.load(f)
+            # Reconstruct in-memory structure (grid_strategy left None to be created later)
+            res = {}
+            for sym, d in raw.items():
+                res[sym] = {
+                    "position": d.get("position", 0),
+                    "entry_price": d.get("entry_price"),
+                    "num_levels": d.get("num_levels", 5),
+                    "status": d.get("status", "Off"),
+                    "buy_orders_placed": d.get("buy_orders_placed", {}),
+                    "sell_orders_placed": d.get("sell_orders_placed", {}),
+                    "grid_strategy": None
+                }
+            return res
         except (FileNotFoundError, json.JSONDecodeError):
             return {}
+
 
     # — GUI actions
     def refresh_table(self):
@@ -707,14 +731,12 @@ class TradingBotGUI:
     def add_crypto(self):
         symbol = self.symbol_entry.get().strip().upper()
         levels = self.levels_entry.get().strip()
-        drawdown = self.drawdown_entry.get().strip()
 
-        if not symbol or not levels.isdigit() or not drawdown.replace(".", "", 1).isdigit():
-            messagebox.showerror("Error", "Invalid input")
+        if not symbol or not levels.isdigit():
+            messagebox.showerror("Error", "Invalid input (symbol and levels required)")
             return
 
         num_levels = int(levels)
-        # drawdown is now just a UI field for backwards compatibility, but not used in grid
 
         # Store grid strategy config
         self.cryptos[symbol] = {
@@ -775,7 +797,14 @@ class TradingBotGUI:
 
             # Fetch current portfolio position
             port = fetch_portfolio()
-            pos = next((p for p in port if p["symbol"] == symbol), None)
+            base_currency = symbol.replace("NOK", "").replace("USD", "").replace("USDT", "")
+            pos = None
+            for p in port:
+                # p["symbol"] may be 'BTC' or 'BTCNOK' depending on fetch_portfolio implementation
+                psym = p.get("symbol", "")
+                if psym == symbol or psym == base_currency or psym.upper() == base_currency.upper():
+                    pos = p
+                    break
             
             if pos:
                 data["position"] = pos["qty"]

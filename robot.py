@@ -4,15 +4,55 @@ import json
 import time
 import threading
 import random
-from firipy import FiriAPI as tradeapi
+import os
+import logging
 import anthropic
+import firipy
 
-DATA_FILE = 'crypto.json'
+DATA_FILE = 'cryptos.json'
 
-key = "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"
-secret_key = "Insert your Firi API secret key here"
-BASE_URL = "Insert base url here"
-api = tradeapi.REST(key, secret_key, BASE_URL, api_version="v2")
+# Read API keys from environment variables (do NOT hard-code keys in source)
+API_KEY_FIRI = os.getenv("FIRI_API_KEY")
+SECRET_KEY_FIRI = os.getenv("FIRI_SECRET_KEY")
+BASE_URL = os.getenv("FIRI_BASE_URL", "https://api.firi.no")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
+
+logging.basicConfig(level=logging.INFO)
+
+
+def create_firi_client(api_key, secret, base_url):
+    if not api_key or not secret:
+        logging.warning("Firi API key/secret not set. Firi client will be disabled.")
+        return None
+    # firipy exposes different client interfaces depending on version.
+    if hasattr(firipy, "REST"):
+        try:
+            return firipy.REST(api_key, secret, base_url, api_version="v2")
+        except Exception:
+            pass
+    if hasattr(firipy, "FiriAPI"):
+        try:
+            return firipy.FiriAPI(api_key, secret, base_url=base_url)
+        except TypeError:
+            return firipy.FiriAPI(api_key, secret)
+    # As a last resort attempt to use firipy as a module with a client function
+    try:
+        return firipy.Client(api_key, secret, base_url)
+    except Exception:
+        logging.error("Unable to instantiate firipy client; please check firipy version and API.")
+        return None
+
+
+# Instantiate clients
+api = create_firi_client(API_KEY_FIRI, SECRET_KEY_FIRI, BASE_URL)
+anthropic_client = None
+if not ANTHROPIC_API_KEY:
+    logging.warning("Anthropic API key not set. Anthropic calls will be disabled.")
+else:
+    try:
+        anthropic_client = anthropic.Client(api_key=ANTHROPIC_API_KEY)
+    except Exception:
+        logging.exception("Failed to create Anthropic client. Check the anthropic package and API key.")
 
 def fetch_portfolio():
     positions = api.list_positions()
@@ -46,29 +86,45 @@ def fetch_mock_api(symbol):
     }
 
 def chatgpt_response(message):
+    # This function uses the Anthropic client (Claude). If the client is not
+    # configured, return an informative message.
+    if anthropic_client is None:
+        return "Anthropic API key not configured. Set ANTHROPIC_API_KEY in your environment."
+
     portfolio_data = fetch_portfolio()
     open_orders = fetch_open_orders()
 
-    pre_prompt = f"""
-    You are an AI portfolio manager responsible for analyzing my crypto-portfolio.
-    Your tasks are the following:
-    1. Evaluate risk-exposures of my current holdings.
-    2. Analyze my open limit orders and their potential impact.
-    3. Provide insights into portfolio health, diversification, trade-adjustments etc.
-    4. Speculate on the market outlook based on current market conditions.
-    5. Identify potential market risks and suggest risk management strategies.
-    
-    Here is my current portfolio data: {portfolio_data}
-    Here are my open orders: {open_orders}
-    Overall, answer the following question with priority having that background: {message}
-    """
-
-    response = openai.ChatCompletion.create(
-        model="gpt-4",
-        messages=[{"role": "system", "content": pre_prompt}],
-        api_key = "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"
+    pre_prompt = (
+        "You are an AI portfolio manager responsible for analyzing my crypto-portfolio.\n"
+        "Your tasks are the following:\n"
+        "1. Evaluate risk-exposures of my current holdings.\n"
+        "2. Analyze my open limit orders and their potential impact.\n"
+        "3. Provide insights into portfolio health, diversification, trade-adjustments etc.\n"
+        "4. Speculate on the market outlook based on current market conditions.\n"
+        "5. Identify potential market risks and suggest risk management strategies.\n\n"
+        f"Here is my current portfolio data: {portfolio_data}\n"
+        f"Here are my open orders: {open_orders}\n\n"
+        f"Overall, answer the following question with priority having that background: {message}\n"
     )
-    return response['choices'][0]['message']['content']
+
+    try:
+        resp = anthropic_client.completions.create(
+            model="claude-2.1",
+            prompt=pre_prompt,
+            max_tokens_to_sample=512,
+        )
+    except Exception as e:
+        logging.exception("Anthropic completion failed")
+        return f"Anthropic request failed: {e}"
+
+    # The response object may be a dict-like or have an attribute; handle both.
+    completion = None
+    if isinstance(resp, dict):
+        completion = resp.get("completion") or resp.get("text")
+    else:
+        completion = getattr(resp, "completion", None) or getattr(resp, "text", None)
+
+    return completion or str(resp)
 
 class TradingBotGUI:
 

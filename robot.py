@@ -8,6 +8,7 @@ import requests
 import threading
 import socket
 from urllib.parse import urlparse
+from collections import deque
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -33,6 +34,122 @@ FIRI_CLIENT_ID = os.getenv("FIRI_CLIENT_ID")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 
 logging.basicConfig(level=logging.INFO)
+
+
+# ————— Volatility & Trend Analysis —————
+
+class MarketAnalyzer:
+    """Fetches OHLC from Binance and computes ATR, EMA, trend."""
+    
+    BINANCE_BASE = "https://api.binance.com/api/v3"
+    
+    @staticmethod
+    def fetch_ohlc(symbol: str, interval: str = "1h", limit: int = 100):
+        """
+        Fetch OHLC from Binance.
+        symbol: e.g., 'BTCUSDT', 'ETHUSDT'
+        interval: '1h', '4h', etc.
+        Returns: list of [open_time, open, high, low, close, volume, ...]
+        """
+        try:
+            url = f"{MarketAnalyzer.BINANCE_BASE}/klines"
+            params = {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit
+            }
+            resp = requests.get(url, params=params, timeout=10)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            logging.error("Failed to fetch OHLC from Binance for %s: %s", symbol, e)
+            return []
+    
+    @staticmethod
+    def calculate_atr(ohlc: list, period: int = 14):
+        """
+        Calculate ATR (Average True Range) from OHLC.
+        ohlc: list of [open_time, open, high, low, close, ...]
+        Returns: (current_atr, atr_list)
+        """
+        if len(ohlc) < period:
+            return None, []
+        
+        atr_values = []
+        for i in range(len(ohlc)):
+            high = float(ohlc[i][2])
+            low = float(ohlc[i][3])
+            close_curr = float(ohlc[i][4])
+            close_prev = float(ohlc[i-1][4]) if i > 0 else close_curr
+            
+            tr = max(high - low, abs(high - close_prev), abs(low - close_prev))
+            atr_values.append(tr)
+        
+        # Simple moving average of true ranges
+        atr = sum(atr_values[-period:]) / period
+        return atr, atr_values
+    
+    @staticmethod
+    def calculate_ema(prices: list, period: int = 20):
+        """
+        Calculate EMA (Exponential Moving Average).
+        prices: list of close prices
+        Returns: current_ema value
+        """
+        if len(prices) < period:
+            return None
+        
+        k = 2 / (period + 1)
+        ema = sum(prices[:period]) / period
+        
+        for price in prices[period:]:
+            ema = price * k + ema * (1 - k)
+        
+        return ema
+    
+    @staticmethod
+    def analyze_trend(symbol: str, interval: str = "4h"):
+        """
+        Detect trend using EMA crossover (20 vs 50).
+        Returns: 'up', 'down', or 'neutral'
+        """
+        ohlc = MarketAnalyzer.fetch_ohlc(symbol, interval=interval, limit=100)
+        if not ohlc or len(ohlc) < 50:
+            return "neutral"
+        
+        closes = [float(candle[4]) for candle in ohlc]
+        
+        ema20 = MarketAnalyzer.calculate_ema(closes, period=20)
+        ema50 = MarketAnalyzer.calculate_ema(closes, period=50)
+        
+        if ema20 is None or ema50 is None:
+            return "neutral"
+        
+        if ema20 > ema50 * 1.01:  # 1% threshold to avoid noise
+            return "up"
+        elif ema20 < ema50 * 0.99:
+            return "down"
+        else:
+            return "neutral"
+    
+    @staticmethod
+    def is_volatility_spike(symbol: str, interval: str = "1h", threshold_mult: float = 1.5):
+        """
+        Detect volatility spike: current ATR > threshold_mult × average ATR.
+        Returns: bool
+        """
+        ohlc = MarketAnalyzer.fetch_ohlc(symbol, interval=interval, limit=100)
+        if not ohlc or len(ohlc) < 14:
+            return False
+        
+        atr, atr_values = MarketAnalyzer.calculate_atr(ohlc, period=14)
+        if atr is None or len(atr_values) < 30:
+            return False
+        
+        avg_atr = sum(atr_values[-30:]) / 30
+        current_atr = atr_values[-1]
+        
+        return current_atr > avg_atr * threshold_mult
 
 
 # ————— Firi REST Client —————
@@ -172,7 +289,123 @@ class FiriClient:
         return self._request("GET", "/v2/markets")
 
 
-# ————— Anthropic Client —————
+# ————— Enhanced Dynamic Grid Strategy —————
+
+class GridStrategy:
+    """
+    Dynamic grid strategy with ATR-based spacing, trend filtering, and symmetrical TP.
+    """
+    
+    def __init__(self, symbol: str, base_price: float, num_levels: int = 5):
+        """
+        Initialize grid strategy.
+        symbol: trading pair (e.g., 'BTCNOK')
+        base_price: current market price to build grid around
+        num_levels: number of grid levels (default 5)
+        """
+        self.symbol = symbol
+        self.base_price = base_price
+        self.num_levels = num_levels
+        self.buy_levels = {}
+        self.sell_levels = {}
+        self.trend = "neutral"
+        self.volatility_spike = False
+        self.atr = None
+        self.grid_active = True
+        
+    def update_market_conditions(self):
+        """Fetch ATR and trend, update strategy state."""
+        # Get Binance symbol (convert from Firi format if needed)
+        binance_symbol = self._to_binance_symbol(self.symbol)
+        
+        # Analyze trend (4h)
+        self.trend = MarketAnalyzer.analyze_trend(binance_symbol, interval="4h")
+        
+        # Check volatility spike (1h)
+        self.volatility_spike = MarketAnalyzer.is_volatility_spike(
+            binance_symbol, interval="1h", threshold_mult=1.5
+        )
+        
+        # Get ATR for grid spacing
+        ohlc = MarketAnalyzer.fetch_ohlc(binance_symbol, interval="1h", limit=100)
+        if ohlc and len(ohlc) >= 14:
+            self.atr, _ = MarketAnalyzer.calculate_atr(ohlc, period=14)
+        
+        # Disable grids if strong trend + volatility spike
+        self.grid_active = not (self.trend in ("up", "down") and self.volatility_spike)
+    
+    def _to_binance_symbol(self, firi_symbol: str):
+        """Convert Firi symbol (e.g., 'BTCNOK') to Binance (e.g., 'BTCUSDT')."""
+        # Simplified mapping — adjust based on actual Firi/Binance symbols
+        symbol_map = {
+            "BTCNOK": "BTCUSDT",
+            "ETHNOK": "ETHUSDT",
+            "ADANOK": "ADAUSDT",
+            "AVAXNOK": "AVAXUSDT",
+        }
+        return symbol_map.get(firi_symbol, firi_symbol.replace("NOK", "USDT"))
+    
+    def generate_grids(self):
+        """
+        Generate buy and sell grids based on ATR and trend.
+        Grid spacing = ATR * 0.5
+        TP target = Grid spacing * 1.5
+        """
+        if self.atr is None or self.atr <= 0:
+            # Fallback: use 2% if ATR unavailable
+            grid_spacing = self.base_price * 0.02
+        else:
+            grid_spacing = self.atr * 0.5
+        
+        tp_target = grid_spacing * 1.5
+        
+        self.buy_levels = {}
+        self.sell_levels = {}
+        
+        for i in range(1, self.num_levels + 1):
+            # Buy levels: below base price
+            buy_price = round(self.base_price - (grid_spacing * i), 2)
+            self.buy_levels[i] = buy_price
+            
+            # Sell levels (TP): symmetrical above buy level + target
+            sell_price = round(buy_price + tp_target, 2)
+            self.sell_levels[i] = sell_price
+        
+        # If strong trend + volatility spike, disable lower (risk) grids
+        if not self.grid_active and self.trend == "up":
+            # Keep only top 2 grids during strong up trend
+            self.buy_levels = {k: v for k, v in self.buy_levels.items() if k <= 2}
+            self.sell_levels = {k: v for k, v in self.sell_levels.items() if k <= 2}
+        elif not self.grid_active and self.trend == "down":
+            # During strong down trend, disable buy grids entirely
+            self.buy_levels = {}
+            self.sell_levels = {}
+    
+    def get_buy_orders(self):
+        """Return list of buy orders to place."""
+        if not self.grid_active:
+            return []
+        return [{"price": price, "level": lvl} for lvl, price in self.buy_levels.items()]
+    
+    def get_sell_orders(self):
+        """Return list of sell (TP) orders to place."""
+        if not self.grid_active:
+            return []
+        return [{"price": price, "level": lvl} for lvl, price in self.sell_levels.items()]
+    
+    def get_status(self):
+        """Return human-readable status."""
+        status = {
+            "trend": self.trend,
+            "volatility_spike": self.volatility_spike,
+            "grid_active": self.grid_active,
+            "atr": round(self.atr, 2) if self.atr else None,
+            "buy_levels": self.buy_levels,
+            "sell_levels": self.sell_levels,
+        }
+        return status
+
+
 
 anthropic_client = None
 if ANTHROPIC_API_KEY:
@@ -409,12 +642,24 @@ class TradingBotGUI:
             self.tree.delete(row)
 
         for symbol, data in self.cryptos.items():
+            grid = data.get("grid_strategy")
+            
+            # Determine grid status
+            if grid:
+                status_text = f"{'ON' if data.get('status') == 'On' else 'Off'} | {grid.trend.upper()}"
+                if grid.volatility_spike:
+                    status_text += " | VOL↑"
+                if not grid.grid_active:
+                    status_text += " | PAUSED"
+            else:
+                status_text = data.get("status", "Off")
+            
             self.tree.insert("", "end", values=(
                 symbol,
                 data.get("position", 0),
                 data.get("entry_price", ""),
-                str(data.get("levels", "")),
-                data.get("status", "Off")
+                str(data.get("num_levels", "")),
+                status_text
             ))
 
     def add_crypto(self):
@@ -426,16 +671,18 @@ class TradingBotGUI:
             messagebox.showerror("Error", "Invalid input")
             return
 
-        levels = int(levels)
-        drawdown = float(drawdown) / 100.0
+        num_levels = int(levels)
+        # drawdown is now just a UI field for backwards compatibility, but not used in grid
 
-        # Placeholder entry price — overwritten later when we compute real buy price
+        # Store grid strategy config
         self.cryptos[symbol] = {
             "position": 0,
             "entry_price": None,
-            "levels": {i + 1: None for i in range(levels)},
-            "drawdown": drawdown,
+            "num_levels": num_levels,
             "status": "Off",
+            "grid_strategy": None,  # Will be initialized on first trade_systems() call
+            "buy_orders_placed": {},  # Track placed order IDs
+            "sell_orders_placed": {},  # Track placed order IDs
         }
         self.save_cryptos()
         self.refresh_table()
@@ -484,38 +731,97 @@ class TradingBotGUI:
             if data.get("status") != "On":
                 continue
 
-            # Compute latest entry price (avg buy) and update position
+            # Fetch current portfolio position
             port = fetch_portfolio()
-            # find this symbol in portfolio
             pos = next((p for p in port if p["symbol"] == symbol), None)
+            
             if pos:
                 data["position"] = pos["qty"]
                 data["entry_price"] = pos["entry_price"]
-
-            # Compute limit order levels from entry price if available
-            if data["entry_price"] is not None:
-                base_price = data["entry_price"]
-                drawdown = data["drawdown"]
-                # compute target prices
-                new_levels = {}
-                for lvl in data["levels"].keys():
-                    target_price = round(base_price * (1 - drawdown * lvl), 2)
-                    new_levels[lvl] = target_price
-
-                data["levels"] = new_levels
-
-                # Place limit orders if not already open
-                for lvl, price in new_levels.items():
-                    # check if an order already exists
-                    open_orders = fetch_open_orders()
-                    exists = any(o["symbol"] == symbol and o["limit_price"] == price for o in open_orders)
-                    if not exists:
-                        try:
-                            firi.submit_order(symbol=symbol, qty=1, side="buy", type_="limit", limit_price=price)
-                            changed = True
-                        except Exception as e:
-                            logging.exception("Error placing order for %s at %s", symbol, price)
-
+                current_price = pos["current_price"]
+            else:
+                current_price = None
+                # Try to fetch current price from Firi ticker
+                try:
+                    ticker = firi.get_ticker(symbol)
+                    current_price = float(ticker.get("last", 0))
+                except Exception as e:
+                    logging.debug("Could not fetch price for %s: %s", symbol, e)
+                    current_price = None
+            
+            if current_price is None or current_price <= 0:
+                logging.warning("Skipping %s — invalid price", symbol)
+                continue
+            
+            # Initialize or update grid strategy
+            if data.get("grid_strategy") is None:
+                grid = GridStrategy(symbol, current_price, num_levels=data.get("num_levels", 5))
+                data["grid_strategy"] = grid
+            else:
+                grid = data["grid_strategy"]
+                # Update base price
+                grid.base_price = current_price
+            
+            # Update market conditions (trend, ATR, volatility)
+            try:
+                grid.update_market_conditions()
+            except Exception as e:
+                logging.debug("Error updating market conditions for %s: %s", symbol, e)
+                # Continue with previous conditions
+            
+            # Generate grids
+            grid.generate_grids()
+            
+            # Place buy orders if grid is active
+            buy_orders = grid.get_buy_orders()
+            for order in buy_orders:
+                lvl = order["level"]
+                price = order["price"]
+                
+                # Check if order already placed
+                existing = data.get("buy_orders_placed", {})
+                if lvl in existing:
+                    continue  # Already placed
+                
+                try:
+                    result = firi.submit_order(
+                        symbol=symbol,
+                        qty=1.0,  # Adjust based on your strategy
+                        side="buy",
+                        type_="limit",
+                        limit_price=price
+                    )
+                    data["buy_orders_placed"][lvl] = result.get("id", str(lvl))
+                    logging.info("Placed BUY order for %s at level %d (price %.2f)", symbol, lvl, price)
+                    changed = True
+                except Exception as e:
+                    logging.error("Error placing BUY order for %s at level %d: %s", symbol, lvl, e)
+            
+            # Place sell orders (TP) if grid is active
+            sell_orders = grid.get_sell_orders()
+            for order in sell_orders:
+                lvl = order["level"]
+                price = order["price"]
+                
+                # Check if order already placed
+                existing = data.get("sell_orders_placed", {})
+                if lvl in existing:
+                    continue  # Already placed
+                
+                try:
+                    result = firi.submit_order(
+                        symbol=symbol,
+                        qty=1.0,  # Adjust based on your strategy
+                        side="sell",
+                        type_="limit",
+                        limit_price=price
+                    )
+                    data["sell_orders_placed"][lvl] = result.get("id", str(lvl))
+                    logging.info("Placed SELL (TP) order for %s at level %d (price %.2f)", symbol, lvl, price)
+                    changed = True
+                except Exception as e:
+                    logging.error("Error placing SELL order for %s at level %d: %s", symbol, lvl, e)
+        
         if changed:
             self.save_cryptos()
             self.refresh_table()

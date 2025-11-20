@@ -614,22 +614,30 @@ class TradingBotGUI:
         self.form_frame = tk.Frame(root)
         self.form_frame.pack(pady=10)
 
-        tk.Label(self.form_frame, text="Symbol:").grid(row=0, column=0)
-        self.symbol_entry = tk.Entry(self.form_frame)
-        self.symbol_entry.grid(row=0, column=1)
+        tk.Label(self.form_frame, text="Symbol (e.g., BTCNOK):").grid(row=0, column=0, padx=5)
+        self.symbol_entry = tk.Entry(self.form_frame, width=12)
+        self.symbol_entry.grid(row=0, column=1, padx=5)
 
-        tk.Label(self.form_frame, text="Levels:").grid(row=0, column=2)
-        self.levels_entry = tk.Entry(self.form_frame)
-        self.levels_entry.grid(row=0, column=3)
+        tk.Label(self.form_frame, text="Investment (NOK):").grid(row=0, column=2, padx=5)
+        self.investment_entry = tk.Entry(self.form_frame, width=12)
+        self.investment_entry.grid(row=0, column=3, padx=5)
+
+        tk.Label(self.form_frame, text="Grid Levels:").grid(row=0, column=4, padx=5)
+        self.levels_entry = tk.Entry(self.form_frame, width=8)
+        self.levels_entry.insert(0, "5")  # Default to 5 levels
+        self.levels_entry.grid(row=0, column=5, padx=5)
 
         self.add_button = tk.Button(self.form_frame, text="Add crypto", command=self.add_crypto)
-        self.add_button.grid(row=0, column=4)
+        self.add_button.grid(row=0, column=6, padx=5)
 
         # GUI: table
-        self.tree = ttk.Treeview(root, columns=("Symbol", "Position", "Entry Price", "Levels", "Status"), show="headings")
-        for col in ("Symbol", "Position", "Entry Price", "Levels", "Status"):
+        self.tree = ttk.Treeview(root, columns=("Symbol", "Investment", "Levels", "Order Size", "Position", "Entry Price", "Status"), show="headings")
+        for col in ("Symbol", "Investment", "Levels", "Order Size", "Position", "Entry Price", "Status"):
             self.tree.heading(col, text=col)
-            self.tree.column(col, width=120)
+            if col == "Status":
+                self.tree.column(col, width=150)
+            else:
+                self.tree.column(col, width=100)
         self.tree.pack(pady=10)
 
         # Toggle / remove
@@ -672,10 +680,11 @@ class TradingBotGUI:
                 "position": data.get("position", 0),
                 "entry_price": data.get("entry_price"),
                 "num_levels": data.get("num_levels"),
+                "investment_amount": data.get("investment_amount", 0),
+                "order_size": data.get("order_size", 0),
                 "status": data.get("status", "Off"),
                 "buy_orders_placed": data.get("buy_orders_placed", {}),
                 "sell_orders_placed": data.get("sell_orders_placed", {}),
-                # persist grid *state* (if present) but not the object
                 "grid_state": data.get("grid_strategy").get_status() if data.get("grid_strategy") else None
             }
         with open(DATA_FILE, "w") as f:
@@ -692,6 +701,8 @@ class TradingBotGUI:
                     "position": d.get("position", 0),
                     "entry_price": d.get("entry_price"),
                     "num_levels": d.get("num_levels", 5),
+                    "investment_amount": d.get("investment_amount", 0),
+                    "order_size": d.get("order_size", 0),
                     "status": d.get("status", "Off"),
                     "buy_orders_placed": d.get("buy_orders_placed", {}),
                     "sell_orders_placed": d.get("sell_orders_placed", {}),
@@ -720,36 +731,69 @@ class TradingBotGUI:
             else:
                 status_text = data.get("status", "Off")
             
+            investment = data.get("investment_amount", 0)
+            order_size = data.get("order_size", 0)
+            
             self.tree.insert("", "end", values=(
                 symbol,
+                f"{investment:.0f}",
+                str(data.get("num_levels", "")),
+                f"{order_size:.2f}",
                 data.get("position", 0),
                 data.get("entry_price", ""),
-                str(data.get("num_levels", "")),
                 status_text
             ))
 
     def add_crypto(self):
         symbol = self.symbol_entry.get().strip().upper()
-        levels = self.levels_entry.get().strip()
+        investment_str = self.investment_entry.get().strip()
+        levels_str = self.levels_entry.get().strip()
 
-        if not symbol or not levels.isdigit():
-            messagebox.showerror("Error", "Invalid input (symbol and levels required)")
+        # Validate inputs
+        if not symbol or not investment_str:
+            messagebox.showerror("Error", "Symbol and Investment amount are required")
             return
 
-        num_levels = int(levels)
+        try:
+            investment_amount = float(investment_str)
+            if investment_amount <= 0:
+                raise ValueError("Investment must be positive")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid investment amount (must be a positive number)")
+            return
 
-        # Store grid strategy config
+        # Levels default to 5 if not specified
+        try:
+            num_levels = int(levels_str) if levels_str else 5
+            if num_levels < 1 or num_levels > 20:
+                raise ValueError("Levels must be between 1 and 20")
+        except ValueError:
+            messagebox.showerror("Error", "Invalid levels (must be 1-20)")
+            return
+
+        # Calculate order size per level
+        order_size = investment_amount / num_levels
+
+        # Store in cryptos dict
         self.cryptos[symbol] = {
             "position": 0,
             "entry_price": None,
             "num_levels": num_levels,
+            "investment_amount": investment_amount,
+            "order_size": order_size,
             "status": "Off",
-            "grid_strategy": None,  # Will be initialized on first trade_systems() call
-            "buy_orders_placed": {},  # Track placed order IDs
-            "sell_orders_placed": {},  # Track placed order IDs
+            "grid_strategy": None,
+            "buy_orders_placed": {},
+            "sell_orders_placed": {},
         }
         self.save_cryptos()
         self.refresh_table()
+        
+        # Clear form
+        self.symbol_entry.delete(0, tk.END)
+        self.investment_entry.delete(0, tk.END)
+        self.levels_entry.delete(0, tk.END)
+        self.levels_entry.insert(0, "5")
 
     def toggle_selected_system(self):
         sel = self.tree.selection()
@@ -855,15 +899,16 @@ class TradingBotGUI:
                     continue  # Already placed
                 
                 try:
+                    order_size = data.get("order_size", 1.0)
                     result = firi.submit_order(
                         symbol=symbol,
-                        qty=1.0,  # Adjust based on your strategy
+                        qty=order_size,
                         side="buy",
                         type_="limit",
                         limit_price=price
                     )
                     data["buy_orders_placed"][lvl] = result.get("id", str(lvl))
-                    logging.info("Placed BUY order for %s at level %d (price %.2f)", symbol, lvl, price)
+                    logging.info("Placed BUY order for %s at level %d (price %.2f, qty %.4f)", symbol, lvl, price, order_size)
                     changed = True
                 except Exception as e:
                     logging.error("Error placing BUY order for %s at level %d: %s", symbol, lvl, e)
@@ -880,15 +925,16 @@ class TradingBotGUI:
                     continue  # Already placed
                 
                 try:
+                    order_size = data.get("order_size", 1.0)
                     result = firi.submit_order(
                         symbol=symbol,
-                        qty=1.0,  # Adjust based on your strategy
+                        qty=order_size,
                         side="sell",
                         type_="limit",
                         limit_price=price
                     )
                     data["sell_orders_placed"][lvl] = result.get("id", str(lvl))
-                    logging.info("Placed SELL (TP) order for %s at level %d (price %.2f)", symbol, lvl, price)
+                    logging.info("Placed SELL (TP) order for %s at level %d (price %.2f, qty %.4f)", symbol, lvl, price, order_size)
                     changed = True
                 except Exception as e:
                     logging.error("Error placing SELL order for %s at level %d: %s", symbol, lvl, e)

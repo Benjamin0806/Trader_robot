@@ -426,13 +426,23 @@ def fetch_portfolio():
 
     # 1. Fetch balances
     try:
-        balances = firi.get_balances()
+        balances_list = firi.get_balances()
     except Exception as e:
         logging.exception("Failed to fetch balances from Firi: %s", e)
         return []
-    # balances format example (depends on Firi): {"BTC": "0.5", "ETH": "2.0", ...}
-    # convert to float
-    balances = {sym: float(qty) for sym, qty in balances.items()}
+    
+    # balances_list is a list of dicts: [{"currency": "BTC", "balance": "0.5", "available": "0.4", ...}]
+    # Convert to dict: {"BTC": 0.5, "ETH": 2.0, ...}
+    if not isinstance(balances_list, list):
+        logging.error("Unexpected balances format: %s", type(balances_list))
+        return []
+    
+    balances = {}
+    for item in balances_list:
+        currency = item.get("currency")
+        balance = float(item.get("balance", 0))
+        if currency and balance > 0:
+            balances[currency] = balance
 
     # 2. Fetch past orders to compute average buy price for each asset
     # We'll fetch **all** filled orders and filter
@@ -441,23 +451,32 @@ def fetch_portfolio():
     except Exception as e:
         logging.exception("Failed to fetch orders from Firi: %s", e)
         all_orders = []
+    
+    if not isinstance(all_orders, list):
+        all_orders = []
+    
     # all_orders is list of dicts with fields including symbol, side, amount, price, etc.
 
     # Build a map: symbol -> (total_bought_amount, total_spent)
     stats = {}
     for o in all_orders:
         # Only consider BUY orders (entry)
-        if o.get("side") != "buy":
+        side = o.get("side")
+        # Firi uses "bid" for buy, "ask" for sell
+        if side not in ("buy", "bid"):
             continue
-        sym = o.get("symbol")
+        
+        sym = o.get("market") or o.get("symbol")  # Try both field names
         amount = float(o.get("amount", 0))
         # For market orders, "price" may not be set, or there may be average_price
         price = float(o.get("price", o.get("avg_price", 0)))
         cost = amount * price
-        if sym not in stats:
-            stats[sym] = {"amt": 0.0, "cost": 0.0}
-        stats[sym]["amt"] += amount
-        stats[sym]["cost"] += cost
+        
+        if sym and cost > 0:
+            if sym not in stats:
+                stats[sym] = {"amt": 0.0, "cost": 0.0}
+            stats[sym]["amt"] += amount
+            stats[sym]["cost"] += cost
 
     portfolio = []
     for sym, qty in balances.items():
@@ -472,13 +491,19 @@ def fetch_portfolio():
         if sym in stats and stats[sym]["amt"] > 0:
             avg_entry = stats[sym]["cost"] / stats[sym]["amt"]
             # fetch latest market price
-            ticker = firi.get_ticker(sym)
-            current_price = float(ticker.get("last", 0))
-            unrealized_pl = qty * (current_price - avg_entry)
+            try:
+                ticker = firi.get_ticker(sym)
+                current_price = float(ticker.get("last", 0))
+                unrealized_pl = qty * (current_price - avg_entry)
+            except Exception as e:
+                logging.debug("Could not fetch ticker for %s: %s", sym, e)
         else:
             # If no order history, we don't know entry price
-            ticker = firi.get_ticker(sym)
-            current_price = float(ticker.get("last", 0))
+            try:
+                ticker = firi.get_ticker(sym)
+                current_price = float(ticker.get("last", 0))
+            except Exception as e:
+                logging.debug("Could not fetch ticker for %s: %s", sym, e)
 
         portfolio.append({
             "symbol": sym,
@@ -495,23 +520,40 @@ def fetch_portfolio():
 def fetch_open_orders():
     """
     Fetch open orders from Firi.
+    Returns list of dicts with symbol, qty, limit_price, side
     """
     if firi is None:
         return []
     try:
-        o = firi.list_orders(status="open")
+        orders = firi.list_orders(status="open")
     except Exception as e:
         logging.exception("Error reading open orders: %s", e)
         return []
-    return [
-        {
-            "symbol": ord.get("symbol"),
-            "qty": float(ord.get("amount", 0)),
-            "limit_price": float(ord.get("price", 0)) if ord.get("price") else None,
-            "side": ord.get("side")
-        }
-        for ord in o
-    ]
+    
+    if not isinstance(orders, list):
+        return []
+    
+    result = []
+    for ord in orders:
+        symbol = ord.get("market") or ord.get("symbol")
+        qty = float(ord.get("amount", 0))
+        price = float(ord.get("price", 0)) if ord.get("price") else None
+        side = ord.get("side")
+        # Convert "bid" -> "buy", "ask" -> "sell" for consistency
+        if side == "bid":
+            side = "buy"
+        elif side == "ask":
+            side = "sell"
+        
+        if symbol and qty > 0:
+            result.append({
+                "symbol": symbol,
+                "qty": qty,
+                "limit_price": price,
+                "side": side
+            })
+    
+    return result
 
 
 def ai_analysis(message: str):

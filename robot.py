@@ -6,6 +6,7 @@ import threading
 import random
 import os
 import logging
+import inspect
 import anthropic
 import firipy
 
@@ -25,22 +26,47 @@ def create_firi_client(api_key, secret, base_url):
         logging.warning("Firi API key/secret not set. Firi client will be disabled.")
         return None
     # firipy exposes different client interfaces depending on version.
-    if hasattr(firipy, "REST"):
+    # We'll attempt to call constructors using only the keyword args they accept.
+    def try_call(constructor, available_kwargs):
         try:
-            return firipy.REST(api_key, secret, base_url, api_version="v2")
+            sig = inspect.signature(constructor)
+            # build kwargs only with parameters the constructor accepts
+            call_kwargs = {}
+            for name, param in sig.parameters.items():
+                if name == 'self':
+                    continue
+                if name in available_kwargs:
+                    call_kwargs[name] = available_kwargs[name]
+            return constructor(**call_kwargs)
         except Exception:
-            pass
-    if hasattr(firipy, "FiriAPI"):
-        try:
-            return firipy.FiriAPI(api_key, secret, base_url=base_url)
-        except TypeError:
-            return firipy.FiriAPI(api_key, secret)
-    # As a last resort attempt to use firipy as a module with a client function
-    try:
-        return firipy.Client(api_key, secret, base_url)
-    except Exception:
-        logging.error("Unable to instantiate firipy client; please check firipy version and API.")
-        return None
+            return None
+
+    available = {
+        'api_key': api_key,
+        'key': api_key,
+        'secret': secret,
+        'secret_key': secret,
+        'base_url': base_url,
+        'host': base_url,
+        'api_version': 'v2',
+    }
+
+    # Try common constructors in order of likelihood
+    if hasattr(firipy, 'REST'):
+        client = try_call(getattr(firipy, 'REST'), available)
+        if client:
+            return client
+    if hasattr(firipy, 'FiriAPI'):
+        client = try_call(getattr(firipy, 'FiriAPI'), available)
+        if client:
+            return client
+    if hasattr(firipy, 'Client'):
+        client = try_call(getattr(firipy, 'Client'), available)
+        if client:
+            return client
+
+    logging.error("Unable to instantiate firipy client; please check firipy version and API.")
+    return None
 
 
 # Instantiate clients
@@ -180,6 +206,10 @@ class TradingBotGUI:
         self.chat_output = tk.Text(root, height=5, width=60, state=tk.DISABLED)
         self.chat_output.pack()
 
+        # Firi test button
+        self.test_button = tk.Button(root, text="Test Firi connection", command=self.test_firi_connection)
+        self.test_button.pack(pady=5)
+
         # Load saved data
         self.refresh_table()
 
@@ -187,6 +217,13 @@ class TradingBotGUI:
         self.running = True
         self.auto_update_thread = threading.Thread(target=self.auto_update, daemon=True)
         self.auto_update_thread.start()
+
+        # Warn user if Firi API client is not configured
+        if api is None:
+            messagebox.showwarning(
+                "Firi Not Configured",
+                "Firi API client not configured. Export FIRI_API_KEY and FIRI_SECRET_KEY to enable trading."
+            )
 
 
     def add_crypto(self):
@@ -209,7 +246,7 @@ class TradingBotGUI:
             "entry_price": entry_price,
             "levels": level_prices,
             "drawdown": drawdown,
-            "status": "off"
+            "status": "Off"
         }
         self.save_cryptos()
         self.refresh_table()
@@ -222,7 +259,9 @@ class TradingBotGUI:
         
         for item in selected_items:
             symbol = self.tree.item(item)['values'][0]
-            self.cryptos[symbol]['status'] = "On" if self.cryptos[symbol]['status'] == "Off" else "Off"
+            # Normalize to consistent casing 'On'/'Off'
+            current = str(self.cryptos.get(symbol, {}).get('status', 'Off'))
+            self.cryptos[symbol]['status'] = "On" if current == "Off" else "Off"
 
         self.save_cryptos()
         self.refresh_table()
@@ -254,32 +293,50 @@ class TradingBotGUI:
         self.chat_input.delete(0, tk.END)
 
     def fetch_firi_data(self, symbol):
+        if api is None:
+            return {"price": -1}
         try:
             barset = api.get_latest_trade(symbol)
-            return {"price":barset.price}
-        except Exception as e:
-            return {"price":-1}
+            return {"price": getattr(barset, 'price', -1)}
+        except Exception:
+            return {"price": -1}
 
     def check_existing_orders(self, symbol, price): 
+        if api is None:
+            return False
         try:
             orders = api.list_orders(status='open', symbols=symbol)
             for order in orders:
-                if float(order.limit_price) == price:
-                    return True
+                try:
+                    if float(order.limit_price) == price:
+                        return True
+                except Exception:
+                    continue
         except Exception as e:
-            messagebox.showerror("API Error", "Error checking orders {e}")
+            messagebox.showerror("API Error", f"Error checking orders: {e}")
         return False
     
     def get_max_entry_price(self, symbol):
+        if api is None:
+            return -1
         try:
             orders = api.list_orders(status='filled', limit=50)
-            prices = [float(order.filled_avg_price) for order in orders if order.filled_avg_price and order.symbol == symbol]
+            prices = []
+            for order in orders:
+                try:
+                    if getattr(order, 'symbol', None) == symbol and getattr(order, 'filled_avg_price', None):
+                        prices.append(float(order.filled_avg_price))
+                except Exception:
+                    continue
             return max(prices) if prices else -1
         except Exception as e:
-            messagebox.showerror("API Error", f"Error fetching orders {e}")
-            return 0
+            messagebox.showerror("API Error", f"Error fetching orders: {e}")
+            return -1
 
     def trade_systems(self):
+        if api is None:
+            # Trading disabled when no API client is configured
+            return
         for symbol, data in self.cryptos.items():
             if data['status'] == 'On':
                 position_exists = False
@@ -324,6 +381,8 @@ class TradingBotGUI:
             return
         
         try:
+            if api is None:
+                raise RuntimeError("Firi API client not configured")
             api.submit_order(
                 symbol=symbol,
                 qty=1,
@@ -334,9 +393,40 @@ class TradingBotGUI:
             )
             self.cryptos[symbol]['levels'][-level] = price
             del self.cryptos[symbol]['levels'][level]
-            print("Placed order for {symbol}@{price}")
+            print(f"Placed order for {symbol}@{price}")
         except Exception as e:
             messagebox.showerror("Order Error", f"Error placing order {e}")
+
+    def test_firi_connection(self):
+        if api is None:
+            messagebox.showwarning("Firi Not Configured", "Firi API client is not configured. Export FIRI_API_KEY and FIRI_SECRET_KEY.")
+            return
+
+        checks = [
+            ('list_positions', False),
+            ('list_orders', True),
+            ('get_account', False),
+            ('get_balance', False),
+        ]
+        results = []
+        for name, takes_args in checks:
+            if hasattr(api, name):
+                try:
+                    fn = getattr(api, name)
+                    if takes_args:
+                        val = fn(status='open')
+                    else:
+                        val = fn()
+                    try:
+                        results.append(f"{name}: returned {len(val)} items")
+                    except Exception:
+                        results.append(f"{name}: returned {repr(val)}")
+                except Exception as e:
+                    results.append(f"{name}: error {e}")
+            else:
+                results.append(f"{name}: not available on client")
+
+        messagebox.showinfo("Firi Test Results", "\n".join(results))
 
 
     def refresh_table(self):
